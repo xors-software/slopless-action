@@ -13,7 +13,7 @@ inputs:
   api-url:
     description: 'Slopless API URL (override for self-hosted)'
     required: false
-    default: 'https://api.unslop.dev'
+    default: 'https://api.slopless.work'
   path:
     description: 'Path to scan (relative to repo root)'
     required: false
