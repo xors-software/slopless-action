@@ -10,6 +10,10 @@ inputs:
   license-key:
     description: 'Slopless license key (from https://slopless.work)'
     required: true
+  api-url:
+    description: 'Slopless API URL (override for self-hosted)'
+    required: false
+    default: 'https://api.unslop.dev'
   path:
     description: 'Path to scan (relative to repo root)'
     required: false
@@ -30,10 +34,6 @@ inputs:
     description: 'Cross-validate HIGH/CRITICAL findings to reduce false positives'
     required: false
     default: 'true'
-  output-format:
-    description: 'Output format: markdown, json, or rich'
-    required: false
-    default: 'markdown'
   comment-on-pr:
     description: 'Post scan results as a PR comment'
     required: false
@@ -59,23 +59,15 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-
-    - name: Install Slopless
-      shell: bash
-      env:
-        GIT_TOKEN: ${{ github.token }}
-      run: |
-        pip install --quiet "git+https://x-access-token:${GIT_TOKEN}@github.com/xors-software/slopless-engine.git"
-
     - name: Run Slopless Scan
       id: scan
       shell: bash
       env:
         SLOPLESS_LICENSE_KEY: ${{ inputs.license-key }}
+        SLOPLESS_API_URL: ${{ inputs.api-url }}
+        SCAN_PATH: ${{ inputs.path }}
+        AUTO_FIX: ${{ inputs.auto-fix }}
+        CROSS_VALIDATE: ${{ inputs.cross-validate }}
       run: |
         bash "${{ github.action_path }}/entrypoint.sh"
 
@@ -97,18 +89,22 @@ runs:
           const critical = '${{ steps.scan.outputs.critical }}';
           const high = '${{ steps.scan.outputs.high }}';
 
-          // Build comment body
           let body = '## Slopless Security Scan\n\n';
 
           if (total === '0') {
             body += '**No vulnerabilities found.** Your code looks clean.\n';
           } else {
+            body += `| Severity | Count |\n|----------|-------|\n`;
+            body += `| Critical | ${critical} |\n`;
+            body += `| High | ${high} |\n`;
+            body += `| **Total** | **${total}** |\n\n`;
+            body += '<details><summary>Full Report</summary>\n\n';
             body += report + '\n';
+            body += '</details>\n';
           }
 
           body += '\n---\n*Powered by [Slopless](https://slopless.work)*';
 
-          // Find existing comment to update
           const { data: comments } = await github.rest.issues.listComments({
             owner: context.repo.owner,
             repo: context.repo.repo,
@@ -139,8 +135,8 @@ runs:
       if: always()
       shell: bash
       run: |
-        critical=${{ steps.scan.outputs.critical }}
-        high=${{ steps.scan.outputs.high }}
+        critical="${{ steps.scan.outputs.critical }}"
+        high="${{ steps.scan.outputs.high }}"
 
         if [[ "${{ inputs.fail-on-critical }}" == "true" && "${critical:-0}" -gt 0 ]]; then
           echo "::error::Found ${critical} CRITICAL vulnerabilities"

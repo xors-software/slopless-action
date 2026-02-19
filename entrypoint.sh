@@ -2,76 +2,140 @@
 set -euo pipefail
 
 # Slopless GitHub Action entrypoint
-# Runs a security scan and outputs results for GitHub Actions
+# Zips the repo and sends it to the Slopless hosted API for scanning.
+# No local dependencies needed — just bash, curl, jq, zip.
 
-SCAN_PATH="${GITHUB_WORKSPACE:-.}"
+API_URL="${SLOPLESS_API_URL:-https://api.unslop.dev}"
+LICENSE_KEY="${SLOPLESS_LICENSE_KEY:?Missing SLOPLESS_LICENSE_KEY}"
+SCAN_DIR="${GITHUB_WORKSPACE:-.}/${SCAN_PATH:-.}"
+AUTO_FIX="${AUTO_FIX:-true}"
+CROSS_VALIDATE="${CROSS_VALIDATE:-true}"
+
 REPORT_FILE="${RUNNER_TEMP:-/tmp}/slopless-report.md"
-JSON_FILE="${RUNNER_TEMP:-/tmp}/slopless-report.json"
+JSON_FILE="${RUNNER_TEMP:-/tmp}/slopless-result.json"
+ZIP_FILE="${RUNNER_TEMP:-/tmp}/slopless-upload.zip"
 
 echo "::group::Slopless Security Scan"
-echo "Scanning: ${SCAN_PATH}"
+echo "API: ${API_URL}"
+echo "Scanning: ${SCAN_DIR}"
 
-# Run the scan, output JSON for parsing
-unslop scan "${SCAN_PATH}" \
-  --format json \
-  --output "${JSON_FILE}" \
-  --cross-validate \
-  --no-fix \
-  || true  # Don't fail here; we check thresholds later
+# ── Zip the repo (exclude heavy/irrelevant dirs) ────────────────────────
+echo "Packaging codebase..."
+cd "${SCAN_DIR}"
+zip -r -q "${ZIP_FILE}" . \
+  -x ".git/*" \
+  -x "node_modules/*" \
+  -x "__pycache__/*" \
+  -x ".venv/*" \
+  -x "venv/*" \
+  -x "dist/*" \
+  -x "build/*" \
+  -x ".next/*" \
+  -x ".nuxt/*" \
+  -x "*.pyc" \
+  -x ".DS_Store"
+
+ZIP_SIZE=$(du -sh "${ZIP_FILE}" | cut -f1)
+echo "Upload size: ${ZIP_SIZE}"
+
+# ── Upload to Slopless API ──────────────────────────────────────────────
+echo "Uploading to Slopless API..."
+HTTP_CODE=$(curl -s -o "${JSON_FILE}" -w "%{http_code}" \
+  -X POST "${API_URL}/v1/proxy/scan/upload" \
+  -H "Authorization: Bearer ${LICENSE_KEY}" \
+  -F "file=@${ZIP_FILE};type=application/zip" \
+  -F "auto_fix=${AUTO_FIX}" \
+  -F "cross_validate=${CROSS_VALIDATE}" \
+  -F "parallel_candidates=3" \
+  -F "run_polish=false" \
+  --max-time 300)
 
 echo "::endgroup::"
 
-# Parse results from JSON
-if [ -f "${JSON_FILE}" ]; then
-  TOTAL=$(python3 -c "
-import json, sys
-try:
-    data = json.load(open('${JSON_FILE}'))
-    vulns = data.get('vulnerabilities', [])
-    print(len(vulns))
-except:
-    print('0')
-")
-  CRITICAL=$(python3 -c "
-import json
-try:
-    data = json.load(open('${JSON_FILE}'))
-    vulns = data.get('vulnerabilities', [])
-    print(sum(1 for v in vulns if v.get('severity','').lower() == 'critical'))
-except:
-    print('0')
-")
-  HIGH=$(python3 -c "
-import json
-try:
-    data = json.load(open('${JSON_FILE}'))
-    vulns = data.get('vulnerabilities', [])
-    print(sum(1 for v in vulns if v.get('severity','').lower() == 'high'))
-except:
-    print('0')
-")
-else
-  TOTAL=0
-  CRITICAL=0
-  HIGH=0
+# ── Handle API response ─────────────────────────────────────────────────
+if [[ "${HTTP_CODE}" -eq 401 ]]; then
+  echo "::error::Invalid or expired license key"
+  echo "total=0" >> "$GITHUB_OUTPUT"
+  echo "critical=0" >> "$GITHUB_OUTPUT"
+  echo "high=0" >> "$GITHUB_OUTPUT"
+  echo "exit_code=1" >> "$GITHUB_OUTPUT"
+  exit 1
 fi
 
-# Generate markdown report
-unslop scan "${SCAN_PATH}" \
-  --format markdown \
-  --output "${REPORT_FILE}" \
-  --cross-validate \
-  --no-fix \
-  2>/dev/null || true
+if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
+  echo "::error::Slopless API returned HTTP ${HTTP_CODE}"
+  if [ -f "${JSON_FILE}" ]; then
+    cat "${JSON_FILE}" >&2
+  fi
+  echo "total=0" >> "$GITHUB_OUTPUT"
+  echo "critical=0" >> "$GITHUB_OUTPUT"
+  echo "high=0" >> "$GITHUB_OUTPUT"
+  echo "exit_code=1" >> "$GITHUB_OUTPUT"
+  exit 1
+fi
 
-# Set outputs
+# ── Parse results ────────────────────────────────────────────────────────
+SUCCESS=$(jq -r '.success // true' "${JSON_FILE}")
+if [[ "${SUCCESS}" == "false" ]]; then
+  ERROR=$(jq -r '.error // "Unknown error"' "${JSON_FILE}")
+  echo "::error::Scan failed: ${ERROR}"
+  echo "total=0" >> "$GITHUB_OUTPUT"
+  echo "critical=0" >> "$GITHUB_OUTPUT"
+  echo "high=0" >> "$GITHUB_OUTPUT"
+  echo "exit_code=1" >> "$GITHUB_OUTPUT"
+  exit 1
+fi
+
+TOTAL=$(jq '[.vulnerabilities // [] | length] | add // 0' "${JSON_FILE}")
+CRITICAL=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "critical" or .severity == "CRITICAL")] | length' "${JSON_FILE}")
+HIGH=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "high" or .severity == "HIGH")] | length' "${JSON_FILE}")
+MEDIUM=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "medium" or .severity == "MEDIUM")] | length' "${JSON_FILE}")
+LOW=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "low" or .severity == "LOW")] | length' "${JSON_FILE}")
+
+echo "Found ${TOTAL} vulnerabilities (${CRITICAL} critical, ${HIGH} high, ${MEDIUM} medium, ${LOW} low)"
+
+# ── Generate markdown report ─────────────────────────────────────────────
+{
+  echo "# Security Vulnerability Report"
+  echo ""
+  echo "## Summary"
+  echo ""
+  echo "| Severity | Count |"
+  echo "|----------|-------|"
+  echo "| Critical | ${CRITICAL} |"
+  echo "| High | ${HIGH} |"
+  echo "| Medium | ${MEDIUM} |"
+  echo "| Low | ${LOW} |"
+  echo "| **Total** | **${TOTAL}** |"
+  echo ""
+
+  if [[ "${TOTAL}" -eq 0 ]]; then
+    echo "No vulnerabilities found."
+  else
+    echo "## Vulnerabilities"
+    echo ""
+    # Extract each vulnerability into markdown
+    jq -r '
+      .vulnerabilities // [] | to_entries[] |
+      "### \(.key + 1). [\(.value.severity // "medium" | ascii_upcase)] \(.value.title // "Untitled")\n" +
+      "**Location:** `\(.value.file_path // "unknown"):\(.value.line_number // "?")`\n" +
+      (if .value.cwe_id then "**CWE:** \(.value.cwe_id)\n" else "" end) +
+      "\n" +
+      (if .value.description then "**Description:**\n\(.value.description)\n\n" else "" end) +
+      (if .value.code_snippet then "**Vulnerable Code:**\n```\n\(.value.code_snippet)\n```\n\n" else "" end) +
+      (if .value.recommendation then "**Recommendation:**\n\(.value.recommendation)\n\n" else "" end) +
+      "---\n"
+    ' "${JSON_FILE}"
+  fi
+} > "${REPORT_FILE}"
+
+# ── Set outputs ──────────────────────────────────────────────────────────
 echo "report=${REPORT_FILE}" >> "$GITHUB_OUTPUT"
 echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
 echo "critical=${CRITICAL}" >> "$GITHUB_OUTPUT"
 echo "high=${HIGH}" >> "$GITHUB_OUTPUT"
 
-# Summary
-if [ "${TOTAL}" -eq 0 ]; then
+if [[ "${TOTAL}" -eq 0 ]]; then
   echo "exit_code=0" >> "$GITHUB_OUTPUT"
   echo "::notice::No vulnerabilities found"
 else
@@ -79,21 +143,23 @@ else
   echo "::warning::Found ${TOTAL} vulnerabilities (${CRITICAL} critical, ${HIGH} high)"
 fi
 
-# GitHub Actions Job Summary
-if [ -f "${REPORT_FILE}" ]; then
-  {
-    echo "## Slopless Security Scan Results"
-    echo ""
-    echo "| Severity | Count |"
-    echo "|----------|-------|"
-    echo "| Critical | ${CRITICAL} |"
-    echo "| High | ${HIGH} |"
-    echo "| Total | ${TOTAL} |"
-    echo ""
+# ── GitHub Actions Job Summary ───────────────────────────────────────────
+{
+  echo "## Slopless Security Scan Results"
+  echo ""
+  echo "| Severity | Count |"
+  echo "|----------|-------|"
+  echo "| Critical | ${CRITICAL} |"
+  echo "| High | ${HIGH} |"
+  echo "| Medium | ${MEDIUM} |"
+  echo "| Low | ${LOW} |"
+  echo "| **Total** | **${TOTAL}** |"
+  echo ""
+  if [[ "${TOTAL}" -gt 0 ]]; then
     echo "<details><summary>Full Report</summary>"
     echo ""
     cat "${REPORT_FILE}"
     echo ""
     echo "</details>"
-  } >> "$GITHUB_STEP_SUMMARY"
-fi
+  fi
+} >> "$GITHUB_STEP_SUMMARY"
