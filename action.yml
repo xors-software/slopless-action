@@ -92,13 +92,9 @@ runs:
           let body = '## Slopless Security Scan\n\n';
 
           if (total === '0') {
-            body += '**No vulnerabilities found.** Your code looks clean.\n';
+            body += '**No findings.** Your code looks clean.\n';
           } else {
-            body += `| Severity | Count |\n|----------|-------|\n`;
-            body += `| Critical | ${critical} |\n`;
-            body += `| High | ${high} |\n`;
-            body += `| **Total** | **${total}** |\n\n`;
-            body += '<details><summary>Full Report</summary>\n\n';
+            body += '<details><summary>' + total + ' findings</summary>\n\n';
             body += report + '\n';
             body += '</details>\n';
           }

@@ -91,8 +91,10 @@ CRITICAL=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "critical" or
 HIGH=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "high" or .severity == "HIGH")] | length' "${JSON_FILE}")
 MEDIUM=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "medium" or .severity == "MEDIUM")] | length' "${JSON_FILE}")
 LOW=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "low" or .severity == "LOW")] | length' "${JSON_FILE}")
+WARNING=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "warning" or .severity == "WARNING")] | length' "${JSON_FILE}")
+INFO=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "info" or .severity == "INFO")] | length' "${JSON_FILE}")
 
-echo "Found ${TOTAL} vulnerabilities (${CRITICAL} critical, ${HIGH} high, ${MEDIUM} medium, ${LOW} low)"
+echo "Found ${TOTAL} findings (${CRITICAL} critical, ${HIGH} high, ${MEDIUM} medium, ${LOW} low, ${WARNING} warning, ${INFO} info)"
 
 # ── Generate markdown report ─────────────────────────────────────────────
 {
@@ -106,6 +108,8 @@ echo "Found ${TOTAL} vulnerabilities (${CRITICAL} critical, ${HIGH} high, ${MEDI
   echo "| High | ${HIGH} |"
   echo "| Medium | ${MEDIUM} |"
   echo "| Low | ${LOW} |"
+  echo "| Warning | ${WARNING} |"
+  echo "| Info | ${INFO} |"
   echo "| **Total** | **${TOTAL}** |"
   echo ""
 
@@ -153,6 +157,8 @@ fi
   echo "| High | ${HIGH} |"
   echo "| Medium | ${MEDIUM} |"
   echo "| Low | ${LOW} |"
+  echo "| Warning | ${WARNING} |"
+  echo "| Info | ${INFO} |"
   echo "| **Total** | **${TOTAL}** |"
   echo ""
   if [[ "${TOTAL}" -gt 0 ]]; then
