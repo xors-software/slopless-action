@@ -5,7 +5,7 @@ set -euo pipefail
 # Zips the repo and sends it to the Slopless hosted API for scanning.
 # No local dependencies needed — just bash, curl, jq, zip.
 
-API_URL="${SLOPLESS_API_URL:-https://api.unslop.dev}"
+API_URL="${SLOPLESS_API_URL:-https://api.slopless.work}"
 LICENSE_KEY="${SLOPLESS_LICENSE_KEY:?Missing SLOPLESS_LICENSE_KEY}"
 SCAN_DIR="${GITHUB_WORKSPACE:-.}/${SCAN_PATH:-.}"
 AUTO_FIX="${AUTO_FIX:-true}"
@@ -48,7 +48,7 @@ HTTP_CODE=$(curl -s -o "${JSON_FILE}" -w "%{http_code}" \
   -F "cross_validate=${CROSS_VALIDATE}" \
   -F "parallel_candidates=3" \
   -F "run_polish=false" \
-  --max-time 300)
+  --max-time 600)
 
 echo "::endgroup::"
 
