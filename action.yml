@@ -66,8 +66,10 @@ runs:
 
     - name: Install Slopless
       shell: bash
+      env:
+        GIT_TOKEN: ${{ github.token }}
       run: |
-        pip install --quiet git+https://github.com/xors-software/slopless-engine.git
+        pip install --quiet "git+https://x-access-token:${GIT_TOKEN}@github.com/xors-software/slopless-engine.git"
 
     - name: Run Slopless Scan
       id: scan
