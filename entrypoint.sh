@@ -96,12 +96,70 @@ INFO=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "info" or .severi
 
 echo "Found ${TOTAL} findings (${CRITICAL} critical, ${HIGH} high, ${MEDIUM} medium, ${LOW} low, ${WARNING} warning, ${INFO} info)"
 
+# ── Extract scan digest (engine v0.2+; every scan ships a digest) ───────
+# Gracefully omit the digest block if the engine response doesn't carry it,
+# so this action stays compatible with older engine deployments.
+HAS_DIGEST=$(jq 'if .summary.scan_digest then true else false end' "${JSON_FILE}")
+if [[ "${HAS_DIGEST}" == "true" ]]; then
+  D_FILES=$(jq -r '.summary.scan_digest.files_scanned // 0' "${JSON_FILE}")
+  D_LINES=$(jq -r '.summary.scan_digest.lines_scanned // 0' "${JSON_FILE}")
+  D_ENTRY=$(jq -r '.summary.scan_digest.entry_points_identified // 0' "${JSON_FILE}")
+  D_SVCS=$(jq -r '.summary.scan_digest.services_identified // 0' "${JSON_FILE}")
+  D_SUB=$(jq -r '.summary.scan_digest.candidates_submitted // 0' "${JSON_FILE}")
+  D_VER=$(jq -r '.summary.scan_digest.candidates_verified // 0' "${JSON_FILE}")
+  D_REJ=$(jq -r '.summary.scan_digest.candidates_rejected // 0' "${JSON_FILE}")
+  D_XVAL=$(jq -r '.summary.scan_digest.cross_validation_rejected // 0' "${JSON_FILE}")
+  D_CONF=$(jq -r '.summary.scan_digest.confidence_score // 0' "${JSON_FILE}")
+  D_REASON=$(jq -r '.summary.scan_digest.confidence_rationale // ""' "${JSON_FILE}")
+  D_LANGS=$(jq -r '.summary.scan_digest.languages // {} | to_entries | map("\(.key) (\(.value))") | join(", ")' "${JSON_FILE}")
+  D_FRAMEWORKS=$(jq -r '.summary.scan_digest.frameworks // [] | join(", ")' "${JSON_FILE}")
+  D_COVERAGE=$(jq -r '.summary.scan_digest.coverage // [] | join(" · ")' "${JSON_FILE}")
+
+  # Confidence emoji: 5 green, 4 yellow, 3 orange, <=2 red.
+  case "${D_CONF}" in
+    5) CONF_EMOJI="🟢" ;;
+    4) CONF_EMOJI="🟡" ;;
+    3) CONF_EMOJI="🟠" ;;
+    *) CONF_EMOJI="🔴" ;;
+  esac
+fi
+
 # ── Generate markdown report ─────────────────────────────────────────────
 {
-  echo "# Security Vulnerability Report"
-  echo ""
-  echo "## Summary"
-  echo ""
+  if [[ "${HAS_DIGEST}" == "true" ]]; then
+    echo "# Slopless Security Scan — ${CONF_EMOJI} ${D_CONF}/5 confidence"
+    echo ""
+    echo "> ${D_REASON}"
+    echo ""
+    echo "## Scope"
+    echo ""
+    echo "| Files | LoC | Languages | Frameworks |"
+    echo "|-------|-----|-----------|------------|"
+    echo "| ${D_FILES} | ${D_LINES} | ${D_LANGS:-—} | ${D_FRAMEWORKS:-—} |"
+    echo ""
+    echo "## Architecture"
+    echo ""
+    echo "- **${D_ENTRY}** entry points identified"
+    echo "- **${D_SVCS}** service(s)"
+    echo ""
+    echo "## Scanner activity"
+    echo ""
+    echo "| Submitted | Verified | Rejected | Cross-val rejected |"
+    echo "|:---------:|:--------:|:--------:|:------------------:|"
+    echo "| ${D_SUB} | ${D_VER} | ${D_REJ} | ${D_XVAL} |"
+    echo ""
+    if [[ -n "${D_COVERAGE}" ]]; then
+      echo "**Vulnerability classes evaluated:** ${D_COVERAGE}"
+      echo ""
+    fi
+    echo "## Findings"
+    echo ""
+  else
+    echo "# Security Vulnerability Report"
+    echo ""
+    echo "## Summary"
+    echo ""
+  fi
   echo "| Severity | Count |"
   echo "|----------|-------|"
   echo "| Critical | ${CRITICAL} |"
