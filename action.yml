@@ -42,6 +42,20 @@ inputs:
     description: 'Max seconds to wait for the hosted API to return scan results. Large repos with Manwe deep passes can take 15-25 min; default 1800s (30 min).'
     required: false
     default: '1800'
+  app-id:
+    description: |
+      GitHub App ID for the Slopless bot. When set alongside `app-private-key`,
+      PR comments are posted as `slopless[bot]` instead of `github-actions[bot]`.
+      Create the App at https://github.com/organizations/<org>/settings/apps/new
+      with Pull requests: Read & write + Issues: Read & write permissions.
+    required: false
+    default: ''
+  app-private-key:
+    description: |
+      Private key (.pem contents) for the Slopless GitHub App. Pair with `app-id`.
+      Store as a repository secret and reference via ${{ secrets.SLOPLESS_APP_PRIVATE_KEY }}.
+    required: false
+    default: ''
 
 outputs:
   report:
@@ -76,10 +90,25 @@ runs:
       run: |
         bash "${{ github.action_path }}/entrypoint.sh"
 
+    # Mint an installation token for the Slopless GitHub App if both app-id
+    # and app-private-key are provided. When the pair is missing this step
+    # is a no-op and the comment step falls back to GITHUB_TOKEN (posts as
+    # github-actions[bot] — old behavior).
+    - name: Generate Slopless App token
+      id: app-token
+      if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' && inputs.app-id != '' && inputs.app-private-key != ''
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+
     - name: Comment on PR
       if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' && always()
       uses: actions/github-script@v7
       with:
+        # When the app-token step ran, use its token so the comment is posted
+        # as slopless[bot]. Otherwise fall back to the runner's GITHUB_TOKEN.
+        github-token: ${{ steps.app-token.outputs.token || github.token }}
         script: |
           const fs = require('fs');
           const reportPath = '${{ steps.scan.outputs.report }}';
@@ -89,22 +118,11 @@ runs:
             return;
           }
 
-          const report = fs.readFileSync(reportPath, 'utf8');
-          const total = '${{ steps.scan.outputs.total }}';
-          const critical = '${{ steps.scan.outputs.critical }}';
-          const high = '${{ steps.scan.outputs.high }}';
-
-          let body = '## Slopless Security Scan\n\n';
-
-          if (total === '0') {
-            body += '**No findings.** Your code looks clean.\n';
-          } else {
-            body += '<details><summary>' + total + ' findings</summary>\n\n';
-            body += report + '\n';
-            body += '</details>\n';
-          }
-
-          body += '\n---\n*Powered by [Slopless](https://slopless.work)*';
+          // entrypoint.sh now writes a fully-rendered markdown report including
+          // the scan_digest block (scope + confidence + coverage). Use it as-is
+          // so the PR comment stays consistent with the CLI/web report.
+          const body = fs.readFileSync(reportPath, 'utf8') +
+            '\n---\n*Powered by [Slopless](https://slopless.work)*';
 
           const { data: comments } = await github.rest.issues.listComments({
             owner: context.repo.owner,
@@ -112,8 +130,12 @@ runs:
             issue_number: context.issue.number,
           });
 
+          // Match both the old and new comment headers so we replace the same
+          // bot comment in-place rather than stacking new ones on top.
           const botComment = comments.find(c =>
-            c.body.includes('## Slopless Security Scan')
+            c.body.includes('## Slopless Security Scan') ||
+            c.body.includes('# Slopless Security Scan') ||
+            c.body.includes('# Security Vulnerability Report')
           );
 
           if (botComment) {
