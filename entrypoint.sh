@@ -114,6 +114,18 @@ if [[ "${HAS_DIGEST}" == "true" ]]; then
   D_LANGS=$(jq -r '.summary.scan_digest.languages // {} | to_entries | map("\(.key) (\(.value))") | join(", ")' "${JSON_FILE}")
   D_FRAMEWORKS=$(jq -r '.summary.scan_digest.frameworks // [] | join(", ")' "${JSON_FILE}")
   D_COVERAGE=$(jq -r '.summary.scan_digest.coverage // [] | join(" · ")' "${JSON_FILE}")
+  # OWASP grouping table (one row per evaluated OWASP Top 10 2021 bucket).
+  # Empty string when the engine is older than v0.3 and doesn't emit the field.
+  HAS_OWASP=$(jq 'if .summary.scan_digest.coverage_by_owasp and (.summary.scan_digest.coverage_by_owasp | length > 0) then true else false end' "${JSON_FILE}")
+  if [[ "${HAS_OWASP}" == "true" ]]; then
+    D_OWASP_ROWS=$(jq -r '
+      .summary.scan_digest.coverage_by_owasp
+      | to_entries
+      | sort_by(.key)
+      | map("| \(.value.category) | \(.value.checks_performed) | \(.value.findings) |")
+      | join("\n")
+    ' "${JSON_FILE}")
+  fi
 
   # Confidence emoji: 5 green, 4 yellow, 3 orange, <=2 red.
   case "${D_CONF}" in
@@ -148,7 +160,16 @@ fi
     echo "|:---------:|:--------:|:--------:|:------------------:|"
     echo "| ${D_SUB} | ${D_VER} | ${D_REJ} | ${D_XVAL} |"
     echo ""
-    if [[ -n "${D_COVERAGE}" ]]; then
+    # Prefer the grouped OWASP table when the engine provides it; fall back
+    # to the flat pill list for compatibility with older engine deployments.
+    if [[ "${HAS_OWASP}" == "true" ]]; then
+      echo "## Coverage (OWASP Top 10 2021)"
+      echo ""
+      echo "| Category | Checks | Findings |"
+      echo "|----------|:------:|:--------:|"
+      echo "${D_OWASP_ROWS}"
+      echo ""
+    elif [[ -n "${D_COVERAGE}" ]]; then
       echo "**Vulnerability classes evaluated:** ${D_COVERAGE}"
       echo ""
     fi
