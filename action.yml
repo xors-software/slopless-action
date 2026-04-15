@@ -38,6 +38,10 @@ inputs:
     description: 'Post scan results as a PR comment'
     required: false
     default: 'true'
+  scan-timeout:
+    description: 'Max seconds to wait for the hosted API to return scan results. Large repos with Manwe deep passes can take 15-25 min; default 1800s (30 min).'
+    required: false
+    default: '1800'
 
 outputs:
   report:
@@ -68,6 +72,7 @@ runs:
         SCAN_PATH: ${{ inputs.path }}
         AUTO_FIX: ${{ inputs.auto-fix }}
         CROSS_VALIDATE: ${{ inputs.cross-validate }}
+        SCAN_TIMEOUT: ${{ inputs.scan-timeout }}
       run: |
         bash "${{ github.action_path }}/entrypoint.sh"
 

@@ -48,7 +48,7 @@ HTTP_CODE=$(curl -s -o "${JSON_FILE}" -w "%{http_code}" \
   -F "cross_validate=${CROSS_VALIDATE}" \
   -F "parallel_candidates=3" \
   -F "run_polish=false" \
-  --max-time 600)
+  --max-time "${SCAN_TIMEOUT:-1800}")
 
 echo "::endgroup::"
 
