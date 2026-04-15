@@ -53,7 +53,8 @@ inputs:
   app-private-key:
     description: |
       Private key (.pem contents) for the Slopless GitHub App. Pair with `app-id`.
-      Store as a repository secret and reference via ${{ secrets.SLOPLESS_APP_PRIVATE_KEY }}.
+      Store as a repository secret (e.g. SLOPLESS_APP_PRIVATE_KEY) and pass it
+      from your workflow via secrets.SLOPLESS_APP_PRIVATE_KEY.
     required: false
     default: ''
 
