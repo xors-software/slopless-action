@@ -88,6 +88,11 @@ runs:
         AUTO_FIX: ${{ inputs.auto-fix }}
         CROSS_VALIDATE: ${{ inputs.cross-validate }}
         SCAN_TIMEOUT: ${{ inputs.scan-timeout }}
+        # Passed through so entrypoint.sh can auto-select pr-review vs full-scan
+        # based on the event. PR_NUMBER is only set on pull_request events.
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         bash "${{ github.action_path }}/entrypoint.sh"
 

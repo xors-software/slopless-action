@@ -15,40 +15,79 @@ REPORT_FILE="${RUNNER_TEMP:-/tmp}/slopless-report.md"
 JSON_FILE="${RUNNER_TEMP:-/tmp}/slopless-result.json"
 ZIP_FILE="${RUNNER_TEMP:-/tmp}/slopless-upload.zip"
 
+# Event-aware endpoint selection:
+#   pull_request  → POST /pr-review/analyze  (diff + architecture; ~1 min)
+#   push / manual → POST /v1/proxy/scan/upload (full Manwe audit; 6–15 min)
+# The proxy full-scan path is what this action has always done; the pr-review
+# path is the targeted flow that's supposed to comment on PRs. Historically
+# every trigger ran the full audit, which is why PR scans were 7+ minutes and
+# consistently blew Manwe's cost budget.
+SCAN_MODE="${SCAN_MODE:-auto}"  # auto | pr-review | full-scan
+if [[ "${SCAN_MODE}" == "auto" ]]; then
+  if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+    SCAN_MODE="pr-review"
+  else
+    SCAN_MODE="full-scan"
+  fi
+fi
+
 echo "::group::Slopless Security Scan"
-echo "API: ${API_URL}"
-echo "Scanning: ${SCAN_DIR}"
+echo "API:    ${API_URL}"
+echo "Event:  ${GITHUB_EVENT_NAME:-<local>}"
+echo "Mode:   ${SCAN_MODE}"
+echo "Scope:  ${SCAN_DIR}"
 
-# ── Zip the repo (exclude heavy/irrelevant dirs) ────────────────────────
-echo "Packaging codebase..."
-cd "${SCAN_DIR}"
-zip -r -q "${ZIP_FILE}" . \
-  -x ".git/*" \
-  -x "node_modules/*" \
-  -x "__pycache__/*" \
-  -x ".venv/*" \
-  -x "venv/*" \
-  -x "dist/*" \
-  -x "build/*" \
-  -x ".next/*" \
-  -x ".nuxt/*" \
-  -x "*.pyc" \
-  -x ".DS_Store"
+if [[ "${SCAN_MODE}" == "pr-review" ]]; then
+  # ── PR review flow: send the PR URL + token, server fetches the diff ──
+  if [[ -z "${GITHUB_REPOSITORY:-}" || -z "${PR_NUMBER:-}" ]]; then
+    echo "::error::pr-review mode requires GITHUB_REPOSITORY and PR_NUMBER envs"
+    exit 1
+  fi
+  PR_URL="https://github.com/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}"
+  echo "PR URL: ${PR_URL}"
 
-ZIP_SIZE=$(du -sh "${ZIP_FILE}" | cut -f1)
-echo "Upload size: ${ZIP_SIZE}"
+  # GITHUB_TOKEN (runner token) has read access to the PR diff for any repo
+  # the workflow runs in. The API uses it to fetch PR files + diff server-side.
+  HTTP_CODE=$(curl -s -o "${JSON_FILE}" -w "%{http_code}" \
+    -X POST "${API_URL}/pr-review/analyze" \
+    -H "Authorization: Bearer ${LICENSE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+          --arg pr_url "${PR_URL}" \
+          --arg access_token "${GITHUB_TOKEN:-${GH_TOKEN:-}}" \
+          '{pr_url: $pr_url, access_token: $access_token, check_security: true, check_architecture: true, check_code_quality: true}')" \
+    --max-time "${SCAN_TIMEOUT:-1800}")
+else
+  # ── Full-scan flow: zip the repo, send to Manwe cognitive loop ──
+  echo "Packaging codebase..."
+  cd "${SCAN_DIR}"
+  zip -r -q "${ZIP_FILE}" . \
+    -x ".git/*" \
+    -x "node_modules/*" \
+    -x "__pycache__/*" \
+    -x ".venv/*" \
+    -x "venv/*" \
+    -x "dist/*" \
+    -x "build/*" \
+    -x ".next/*" \
+    -x ".nuxt/*" \
+    -x "*.pyc" \
+    -x ".DS_Store"
 
-# ── Upload to Slopless API ──────────────────────────────────────────────
-echo "Uploading to Slopless API..."
-HTTP_CODE=$(curl -s -o "${JSON_FILE}" -w "%{http_code}" \
-  -X POST "${API_URL}/v1/proxy/scan/upload" \
-  -H "Authorization: Bearer ${LICENSE_KEY}" \
-  -F "file=@${ZIP_FILE};type=application/zip" \
-  -F "auto_fix=${AUTO_FIX}" \
-  -F "cross_validate=${CROSS_VALIDATE}" \
-  -F "parallel_candidates=3" \
-  -F "run_polish=false" \
-  --max-time "${SCAN_TIMEOUT:-1800}")
+  ZIP_SIZE=$(du -sh "${ZIP_FILE}" | cut -f1)
+  echo "Upload size: ${ZIP_SIZE}"
+
+  echo "Uploading to Slopless API..."
+  HTTP_CODE=$(curl -s -o "${JSON_FILE}" -w "%{http_code}" \
+    -X POST "${API_URL}/v1/proxy/scan/upload" \
+    -H "Authorization: Bearer ${LICENSE_KEY}" \
+    -F "file=@${ZIP_FILE};type=application/zip" \
+    -F "auto_fix=${AUTO_FIX}" \
+    -F "cross_validate=${CROSS_VALIDATE}" \
+    -F "parallel_candidates=3" \
+    -F "run_polish=false" \
+    --max-time "${SCAN_TIMEOUT:-1800}")
+fi
 
 echo "::endgroup::"
 
@@ -97,34 +136,36 @@ INFO=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "info" or .severi
 echo "Found ${TOTAL} findings (${CRITICAL} critical, ${HIGH} high, ${MEDIUM} medium, ${LOW} low, ${WARNING} warning, ${INFO} info)"
 
 # ── Extract scan digest (engine v0.2+; every scan ships a digest) ───────
-# Gracefully omit the digest block if the engine response doesn't carry it,
-# so this action stays compatible with older engine deployments.
-HAS_DIGEST=$(jq 'if .summary.scan_digest then true else false end' "${JSON_FILE}")
+# scan_digest lives at .summary.scan_digest (proxy full scan) or .scan_digest
+# (pr-review). Normalise by extracting the digest object itself into a file
+# once; all downstream jq uses the root of that file.
+DIGEST_FILE="${RUNNER_TEMP:-/tmp}/slopless-digest.json"
+jq '(.summary.scan_digest // .scan_digest // null)' "${JSON_FILE}" > "${DIGEST_FILE}"
+HAS_DIGEST=$(jq 'if . == null then false else true end' "${DIGEST_FILE}")
 if [[ "${HAS_DIGEST}" == "true" ]]; then
-  D_FILES=$(jq -r '.summary.scan_digest.files_scanned // 0' "${JSON_FILE}")
-  D_LINES=$(jq -r '.summary.scan_digest.lines_scanned // 0' "${JSON_FILE}")
-  D_ENTRY=$(jq -r '.summary.scan_digest.entry_points_identified // 0' "${JSON_FILE}")
-  D_SVCS=$(jq -r '.summary.scan_digest.services_identified // 0' "${JSON_FILE}")
-  D_SUB=$(jq -r '.summary.scan_digest.candidates_submitted // 0' "${JSON_FILE}")
-  D_VER=$(jq -r '.summary.scan_digest.candidates_verified // 0' "${JSON_FILE}")
-  D_REJ=$(jq -r '.summary.scan_digest.candidates_rejected // 0' "${JSON_FILE}")
-  D_XVAL=$(jq -r '.summary.scan_digest.cross_validation_rejected // 0' "${JSON_FILE}")
-  D_CONF=$(jq -r '.summary.scan_digest.confidence_score // 0' "${JSON_FILE}")
-  D_REASON=$(jq -r '.summary.scan_digest.confidence_rationale // ""' "${JSON_FILE}")
-  D_LANGS=$(jq -r '.summary.scan_digest.languages // {} | to_entries | map("\(.key) (\(.value))") | join(", ")' "${JSON_FILE}")
-  D_FRAMEWORKS=$(jq -r '.summary.scan_digest.frameworks // [] | join(", ")' "${JSON_FILE}")
-  D_COVERAGE=$(jq -r '.summary.scan_digest.coverage // [] | join(" · ")' "${JSON_FILE}")
-  # OWASP grouping table (one row per evaluated OWASP Top 10 2021 bucket).
-  # Empty string when the engine is older than v0.3 and doesn't emit the field.
-  HAS_OWASP=$(jq 'if .summary.scan_digest.coverage_by_owasp and (.summary.scan_digest.coverage_by_owasp | length > 0) then true else false end' "${JSON_FILE}")
+  D_FILES=$(jq -r '.files_scanned // 0' "${DIGEST_FILE}")
+  D_LINES=$(jq -r '.lines_scanned // 0' "${DIGEST_FILE}")
+  D_ENTRY=$(jq -r '.entry_points_identified // 0' "${DIGEST_FILE}")
+  D_SVCS=$(jq -r '.services_identified // 0' "${DIGEST_FILE}")
+  D_SUB=$(jq -r '.candidates_submitted // 0' "${DIGEST_FILE}")
+  D_VER=$(jq -r '.candidates_verified // 0' "${DIGEST_FILE}")
+  D_REJ=$(jq -r '.candidates_rejected // 0' "${DIGEST_FILE}")
+  D_XVAL=$(jq -r '.cross_validation_rejected // 0' "${DIGEST_FILE}")
+  D_CONF=$(jq -r '.confidence_score // 0' "${DIGEST_FILE}")
+  D_REASON=$(jq -r '.confidence_rationale // ""' "${DIGEST_FILE}")
+  D_LANGS=$(jq -r '.languages // {} | to_entries | map("\(.key) (\(.value))") | join(", ")' "${DIGEST_FILE}")
+  D_FRAMEWORKS=$(jq -r '.frameworks // [] | join(", ")' "${DIGEST_FILE}")
+  D_COVERAGE=$(jq -r '.coverage // [] | join(" · ")' "${DIGEST_FILE}")
+  # OWASP grouping table (engine v0.3+; older engines don't emit the field)
+  HAS_OWASP=$(jq 'if .coverage_by_owasp and (.coverage_by_owasp | length > 0) then true else false end' "${DIGEST_FILE}")
   if [[ "${HAS_OWASP}" == "true" ]]; then
     D_OWASP_ROWS=$(jq -r '
-      .summary.scan_digest.coverage_by_owasp
+      .coverage_by_owasp
       | to_entries
       | sort_by(.key)
       | map("| \(.value.category) | \(.value.checks_performed) | \(.value.findings) |")
       | join("\n")
-    ' "${JSON_FILE}")
+    ' "${DIGEST_FILE}")
   fi
 
   # Confidence emoji: 5 green, 4 yellow, 3 orange, <=2 red.
