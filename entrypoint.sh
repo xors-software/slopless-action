@@ -136,11 +136,20 @@ INFO=$(jq '[.vulnerabilities // [] | .[] | select(.severity == "info" or .severi
 echo "Found ${TOTAL} findings (${CRITICAL} critical, ${HIGH} high, ${MEDIUM} medium, ${LOW} low, ${WARNING} warning, ${INFO} info)"
 
 # ── Extract scan digest (engine v0.2+; every scan ships a digest) ───────
-# scan_digest lives at .summary.scan_digest (proxy full scan) or .scan_digest
-# (pr-review). Normalise by extracting the digest object itself into a file
-# once; all downstream jq uses the root of that file.
+# scan_digest lives at:
+#   .scan_digest          — pr-review shape (PRReviewResponse; .summary is a
+#                           human-readable string, so do NOT try to index it)
+#   .summary.scan_digest  — full-scan / proxy shape (.summary is an object)
+# Check pr-review shape first so we never accidentally index a string.
+# Normalise by extracting the digest object into its own file; downstream
+# jq operates on the root of that file.
 DIGEST_FILE="${RUNNER_TEMP:-/tmp}/slopless-digest.json"
-jq '(.summary.scan_digest // .scan_digest // null)' "${JSON_FILE}" > "${DIGEST_FILE}"
+jq '(
+  if has("scan_digest") and (.scan_digest | type) == "object" then .scan_digest
+  elif (.summary // null | type) == "object" and (.summary.scan_digest // null) != null then .summary.scan_digest
+  else null
+  end
+)' "${JSON_FILE}" > "${DIGEST_FILE}"
 HAS_DIGEST=$(jq 'if . == null then false else true end' "${DIGEST_FILE}")
 if [[ "${HAS_DIGEST}" == "true" ]]; then
   D_FILES=$(jq -r '.files_scanned // 0' "${DIGEST_FILE}")
