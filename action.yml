@@ -42,6 +42,15 @@ inputs:
     description: 'Max seconds to wait for the hosted API to return scan results. Large repos with Manwe deep passes can take 15-25 min; default 1800s (30 min).'
     required: false
     default: '1800'
+  review-on-updates:
+    description: |
+      Re-run the review when new commits are pushed to an already-open PR.
+      Default: false — review fires only once (on PR open). Subsequent pushes
+      are skipped with a notice. Set to 'true' to scan every push (like
+      Greptile's triggerOnUpdates). The existing comment is always edited in
+      place, never duplicated.
+    required: false
+    default: 'false'
   app-id:
     description: |
       GitHub App ID for the Slopless bot. When set alongside `app-private-key`,
@@ -91,8 +100,10 @@ runs:
         # Passed through so entrypoint.sh can auto-select pr-review vs full-scan
         # based on the event. PR_NUMBER is only set on pull_request events.
         GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_EVENT_ACTION: ${{ github.event.action }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         GITHUB_TOKEN: ${{ github.token }}
+        REVIEW_ON_UPDATES: ${{ inputs.review-on-updates }}
       run: |
         bash "${{ github.action_path }}/entrypoint.sh"
 
