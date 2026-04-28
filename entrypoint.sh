@@ -15,6 +15,26 @@ REPORT_FILE="${RUNNER_TEMP:-/tmp}/slopless-report.md"
 JSON_FILE="${RUNNER_TEMP:-/tmp}/slopless-result.json"
 ZIP_FILE="${RUNNER_TEMP:-/tmp}/slopless-upload.zip"
 
+# ── First-push-only guard ──────────────────────────────────────────────
+# Default behaviour: review only fires when the PR is first opened (action
+# = "opened" or "reopened"). Subsequent pushes (action = "synchronize") are
+# skipped unless REVIEW_ON_UPDATES=true. The existing comment is never
+# duplicated — the "Comment on PR" step always edits in place.
+#
+# This mirrors Greptile's default UX (triggerOnUpdates: false). Users who
+# want a re-review on every push set `review-on-updates: 'true'` in their
+# workflow, or manually request one via workflow_dispatch.
+EVENT_ACTION="${GITHUB_EVENT_ACTION:-}"
+REVIEW_ON_UPDATES="${REVIEW_ON_UPDATES:-false}"
+if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && "${EVENT_ACTION}" == "synchronize" && "${REVIEW_ON_UPDATES}" != "true" ]]; then
+  echo "::notice::Slopless: skipping re-review on push (review-on-updates is false). To re-scan, set review-on-updates: 'true' or re-run this workflow manually."
+  echo "total=0" >> "$GITHUB_OUTPUT"
+  echo "critical=0" >> "$GITHUB_OUTPUT"
+  echo "high=0" >> "$GITHUB_OUTPUT"
+  echo "exit_code=0" >> "$GITHUB_OUTPUT"
+  exit 0
+fi
+
 # Event-aware endpoint selection:
 #   pull_request  → POST /pr-review/analyze  (diff + architecture; ~1 min)
 #   push / manual → POST /v1/proxy/scan/upload (full Manwe audit; 6–15 min)
